@@ -1,0 +1,18 @@
+{
+  "luci-app-cams": {
+    "description": "Webcam settings and stream statistics",
+    "read": {
+      "uci": [ "cams" ],
+      "file": {
+        "/usr/sbin/cams-list": [ "exec" ],
+        "/usr/sbin/cams-stats": [ "exec" ],
+        "/usr/sbin/cams-apply": [ "exec" ],
+        "/usr/sbin/cams-usbip": [ "exec" ],
+        "/etc/init.d/cams": [ "exec" ]
+      }
+    },
+    "write": {
+      "uci": [ "cams" ]
+    }
+  }
+}

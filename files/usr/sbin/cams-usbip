@@ -1,0 +1,84 @@
+#!/bin/sh
+# USB/IP export of the UVC cameras (router = USB/IP server, client = PC).
+# Uses plain sysfs, the same writes as "usbip bind": unbind the device from its driver,
+# "add <busid>" to usbip-host/match_busid, busid to usbip-host/bind.
+# usage: cams-usbip start | stop | sync | status
+SYS=${SYSFS:-/sys}
+DRV=$SYS/bus/usb/drivers/usbip-host
+DEVS=$SYS/bus/usb/devices
+LOCK=${USBIP_LOCK:-/tmp/cams-usbip.lock}
+
+installed() { [ -x "${USBIPD:-/usr/sbin/usbipd}" ]; }
+
+# bus ids of devices that have a video-class (0x0e) interface and are not exported yet
+video_busids() {
+  for i in "$DEVS"/*:*; do
+    [ -e "$i/bInterfaceClass" ] || continue
+    [ "$(cat "$i/bInterfaceClass" 2>/dev/null)" = "0e" ] || continue
+    basename "$i" | cut -d: -f1
+  done | sort -u
+}
+
+exported() {
+  [ -d "$DRV" ] || return 0
+  for d in "$DRV"/*; do
+    b=$(basename "$d")
+    case "$b" in [0-9]*-[0-9]*) echo "$b" ;; esac
+  done
+}
+
+bind_one() {
+  b=$1
+  [ -d "$DRV/$b" ] && return 0
+  drv=$(readlink "$DEVS/$b/driver" 2>/dev/null)
+  drv=$(basename "$drv" 2>/dev/null)
+  [ -n "$drv" ] && echo "$b" > "$SYS/bus/usb/drivers/$drv/unbind" 2>/dev/null
+  echo "add $b" > "$DRV/match_busid" 2>/dev/null
+  if echo "$b" > "$DRV/bind" 2>/dev/null; then
+    logger -t cams-usbip "exported $b over USB/IP"
+  else
+    logger -t cams-usbip "cannot bind $b to usbip-host"
+    echo "del $b" > "$DRV/match_busid" 2>/dev/null
+    return 1
+  fi
+}
+
+unbind_one() {
+  b=$1
+  echo "del $b" > "$DRV/match_busid" 2>/dev/null
+  echo "$b" > "$DRV/unbind" 2>/dev/null
+  echo "$b" > "$SYS/bus/usb/drivers_probe" 2>/dev/null
+  logger -t cams-usbip "returned $b to the router"
+}
+
+case "$1" in
+  start|sync)
+    installed || { logger -t cams-usbip "USB/IP is not in this image (build with usbip=server)"; exit 1; }
+    [ -d "$DRV" ] || { modprobe usbip-core 2>/dev/null; modprobe usbip-host 2>/dev/null; sleep 1; }
+    [ -d "$DRV" ] || { logger -t cams-usbip "usbip-host module is not available"; exit 1; }
+    # serialize start and hotplug runs
+    n=0
+    while ! mkdir "$LOCK" 2>/dev/null; do
+      n=$((n + 1)); [ "$n" -gt 20 ] && break; sleep 1
+    done
+    for b in $(video_busids); do bind_one "$b"; done
+    rmdir "$LOCK" 2>/dev/null
+    [ "$1" = start ] && /etc/init.d/usbipd start >/dev/null 2>&1
+    ;;
+  stop)
+    for b in $(exported); do unbind_one "$b"; done
+    /etc/init.d/usbipd stop >/dev/null 2>&1
+    ;;
+  status)
+    inst=0; installed && inst=1
+    on=0; [ "$(uci -q get cams.defaults.usbip 2>/dev/null)" = "1" ] && on=1
+    lis=0; netstat -ltn 2>/dev/null | grep -q ':3240 ' && lis=1
+    ex=$(exported | tr '\n' ',')
+    echo "installed=$inst enabled=$on listening=$lis exported=${ex%,}"
+    ;;
+  *)
+    echo "usage: $0 start|stop|sync|status" >&2
+    exit 2
+    ;;
+esac
+exit 0
